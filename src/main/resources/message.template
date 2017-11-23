@@ -1,0 +1,1 @@
+#[message.payload['priority']] #[new org.mule.el.datetime.DateTime(new java.util.Date(message.payload['timestamp'])).format('yyyy-MM-dd HH:mm:ss,SSS')] #['[' + message.payload['loggerName'] + ']'] #[message.payload['message']]

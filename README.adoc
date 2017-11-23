@@ -1,0 +1,37 @@
+= SplunkAggregator
+
+An example of an application which collects logs from CloudHub using the CloudHub API and pushes them to Splunk via TCP.
+
+* Collects logs from all applications on the environment it is deployed to.
+* Uses TCP transport, but can be easily modified to use an HTTP Appender.
+* Can be easily modified to use different destinations systems, e.g. ELK, databases, Hadoop, S3, etc.
+
+=== Configuring
+* Edit `pom.xml` and modify the following properties to specify the deployment options:
+
+    arm.deploy.username
+    arm.deploy.password
+    arm.deploy.businessGroup
+    anypoint.platform.client_id
+    anypoint.platform.client_secret
+    cloudhub.aws.region
+    target.env
+
+* Edit one or more properties files for the corresponding environments, e.g. `src/main/resources/splunk-aggregator.dev.properties` to set the following properties:
+
+[cols="2a,4a", options="header"]
+|=====
+^| Property Name ^| Description
+^| `cloudhub.host` ^| Anypoint Platform host name (normally should be `anypoint.mulesoft.com` but can also point to the location of the Anypoitn Platform On-Premise)
+^| `cloudhub.port` ^| Anypoint Platform port (normally 443)
+^| `cloudhub.user` ^| User name, must be authorized to access the CloudHub APIs
+^| `cloudhub.password` ^| Password
+^| `environment.id` ^| An ID of the environment from which logs are collected
+^| `polling.frequency` ^| How often new logs are collected. For average size deployment 10 to 30 seconds interval is recommended.
+^| `splunk.ip` ^| Splunk IP Address
+^| `splunk.port` ^| Splunk port
+|=====
+
+* Edit `src/main/resources/message.template` to specify the format of the message which can be parsed by Splunk.
+
+

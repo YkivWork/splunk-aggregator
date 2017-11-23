@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:json="http://www.mulesoft.org/schema/mule/json"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" xmlns:objectstore="http://www.mulesoft.org/schema/mule/objectstore"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns:vm="http://www.mulesoft.org/schema/mule/vm"
+	xmlns:dw="http://www.mulesoft.org/schema/mule/ee/dw"
+	xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:spring="http://www.springframework.org/schema/beans" 
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/objectstore http://www.mulesoft.org/schema/mule/objectstore/current/mule-objectstore.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd
+http://www.mulesoft.org/schema/mule/ee/dw http://www.mulesoft.org/schema/mule/ee/dw/current/dw.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd">
+<flow name="auditPollFlow" processingStrategy="synchronous" initialState="started">
+        <poll doc:name="Poll">
+            <fixed-frequency-scheduler frequency="30" timeUnit="MINUTES"/>
+            <logger message="Started Polling at #[server.dateTime]" level="INFO" doc:name="Logger"/>
+        </poll>
+        <flow-ref name="login" doc:name="login"/>
+        <flow-ref name="auditLogsFlow" doc:name="auditLogsFlow"/>
+        <logger message="Finished polling and logs are updated at #[server.dateTime]" level="INFO" doc:name="Logger"/>
+    </flow>
+    
+    <flow name="login" processingStrategy="synchronous">
+        <enricher target="#[flowVars.bearerToken]" doc:name="Message Enricher">
+            <processor-chain doc:name="Processor Chain">
+                <set-payload value="#['']" doc:name="Set Payload"/>
+                <ee:cache cachingStrategy-ref="ExpirableCachingStrategy" doc:name="Cache">
+                    <http:request config-ref="CloudHub" path="/accounts/login" method="POST" doc:name="HTTP">
+                        <http:request-builder>
+                            <http:query-param paramName="username" value="${cloudhub.user}"/>
+                            <http:query-param paramName="password" value="${cloudhub.password}"/>
+                        </http:request-builder>
+                    </http:request>
+                    <object-to-string-transformer doc:name="Object to String"/>
+                    <json:json-to-object-transformer returnClass="java.util.Map" doc:name="JSON to Object"/>
+                    <set-payload value="#[message.payload['access_token']]" doc:name="Set Payload"/>
+                    <logger message="Bearer Token is #[message.payload]" level="INFO" doc:name="Logger"/>
+                </ee:cache>
+            </processor-chain>
+        </enricher>
+    </flow>
+        <flow name="auditLogsFlow" processingStrategy="synchronous">
+        <logger message="flow = start = auditLogsFlow" level="INFO" doc:name="Logger"/>
+        <set-variable variableName="currentdate" value="#[function:systime]" doc:name="current timestamp"/>
+        <objectstore:retrieve config-ref="AuditObjectStore" key="auditkey" defaultValue-ref="#['']" targetProperty="lasttime" doc:name="ObjectStore"/>
+        <dw:transform-message doc:name="Transform Message">
+            <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+---
+{
+	"startDate": flowVars.lasttime when ((flowVars.lasttime != '') and (flowVars.currentdate != flowVars.lasttime)) otherwise flowVars.currentdate when (flowVars.lasttime == '') otherwise null,
+	"endDate": flowVars.currentdate,
+	"ascending": true
+}]]></dw:set-payload>
+            <dw:set-variable variableName="beforedate"><![CDATA[%dw 1.0
+%output application/java
+---
+startDate: flowVars.lasttime when ((flowVars.lasttime != '') and (flowVars.currentdate != flowVars.lasttime)) otherwise flowVars.currentdate when (flowVars.lasttime == '') otherwise null]]></dw:set-variable>
+        </dw:transform-message>
+        <logger message="System Time:#[flowVars.currentdate]  &lt;----------------------&gt;  Time of Next New Log #[flowVars.lasttime]   &lt;---------------------------&gt;  Logs Request to cloudhub #[payload]" level="DEBUG" doc:name="Logger"/>
+        <objectstore:store config-ref="AuditObjectStore" key="auditkey" value-ref="#[flowVars.beforedate.startDate]" overwrite="true" doc:name="ObjectStore"/>
+        <until-successful maxRetries="2" synchronous="true" doc:name="Until Successful" failureExpression="exception!=null &amp;&amp; (exception.causedBy(java.io.IOException) || exception.causedBy(java.net.ConnectException)  || exception.causedBy(java.net.SocketTimeoutException))" millisBetweenRetries="10000">
+            <http:request config-ref="CloudHub" path="/accounts/audit/v2/organizations/${company.organization.id}/query" method="POST" doc:name="Cloudhub_HTTP">
+                <http:request-builder>
+                    <http:header headerName="Authorization" value="Bearer #[flowVars.bearerToken]"/>
+                    <http:header headerName="Content-Type" value="application/json"/>
+                </http:request-builder>
+                <http:success-status-code-validator values="200..599"/>
+            </http:request>
+        </until-successful>
+        <logger message="#[message.payloadAs(java.lang.String)]" level="DEBUG" doc:name="Logger"/>
+        <choice doc:name="Choice">
+            <when expression="#[message.inboundProperties['http.status'] &lt;= 299]">
+                <dw:transform-message doc:name="Transform Message">
+                    <dw:set-payload><![CDATA[%dw 1.0
+%output application/java
+---
+payload.data]]></dw:set-payload>
+                </dw:transform-message>
+                <choice doc:name="Choice">
+                    <when expression="#[message.payload.size() != 0]">
+                        <logger message="Number of logs retrieved:  #[payload.size()]" level="INFO" doc:name="Logger"/>
+                        <set-variable variableName="lastRecord" value="#[payload.get(payload.size() - 1)]" doc:name="lastRecord"/>
+                        <set-variable variableName="nextRecord" value="#[flowVars.lastRecord.timestamp +1]" doc:name="nextRecord"/>
+                        <logger message="lastRecordDate:   #[flowVars.lastRecord.timestamp]   -------------   time the next log should be retrieved:  #[flowVars.nextRecord]" level="DEBUG" doc:name="Logger"/>
+                        <objectstore:store config-ref="AuditObjectStore" key="auditkey" value-ref="#[flowVars.nextRecord]" overwrite="true" doc:name="ObjectStore"/>
+                        <foreach batchSize="100" doc:name="For Each">
+                            <vm:outbound-endpoint exchange-pattern="request-response" path="auditpath" connector-ref="AuditVM" doc:name="VM"/>
+                        </foreach>
+
+                    </when>
+                    <otherwise>
+                        <logger level="INFO" doc:name="Logger" message="No new Logs to retrieve from cloudhub"/>
+                    </otherwise>
+                </choice>
+            </when>
+            <otherwise>
+                <logger level="INFO" doc:name="Logger" message="Error receiving logs from cloudhub"/>
+            </otherwise>
+        </choice>
+        <logger message="flow = end = auditLogsFlow" level="INFO" doc:name="Logger"/>
+    </flow>
+    
+    <flow name="batchFlow">
+        <vm:inbound-endpoint exchange-pattern="request-response" path="auditpath" connector-ref="AuditVM" doc:name="VM"/>
+        <logger message="flow = start = batchFlow" level="INFO" doc:name="Logger"/>
+        <set-variable variableName="timezone" value="#[server.dateTime.timeZone]" doc:name="current timezone"/>
+        <dw:transform-message doc:name="Transform Message">
+            <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+%var zone = "America/Chicago" when (flowVars.timezone == "Central Standard Time") otherwise 
+            "America/New_York" when (flowVars.timezone == "Eastern Standard Time") otherwise 
+            "America/Los_Angeles" when (flowVars.timezone == "Pacific Standard Time") otherwise
+            "America/Denver" when (flowVars.timezone == "Mountain Standard Time") otherwise
+            "America/Anchorage" when (flowVars.timezone == "Alaska Standard Time") otherwise
+            "America/Dominica" when (flowVars.timezone == "Atlantic Standard Time") otherwise
+            "Pacific/Honolulu" when (flowVars.timezone == "Hawaii-Aleutian Standard Time") otherwise "GMT"
+---
+payload map {
+	event: $.action,
+	sourcetype: "mulesoft:cloudhub",
+	platform: $.platform,
+	timestamp: $.timestamp,
+	time: $.timestamp as :datetime {unit: "milliseconds"} as :localdatetime {format: "yyyy-MM-dd HH:mm:ss.SSS"}  >> zone as :string {format: "yyyy-MM-dd HH:mm:ss.SSS"} ++ " " ++ ((flowVars.timezone) when zone != "GMT" otherwise "GMT"),
+	userId: $.userId,
+	serverIP: $.serverIP,
+	clientIP: $.clientIP,
+	payload: $.payload,
+	failed: $.failed,
+	failedCause: $.failedCause,
+	objects: $.objects
+}]]></dw:set-payload>
+        </dw:transform-message>
+        <set-variable variableName="finalpayload" value="#[payload]" doc:name="Variable"/>
+        <until-successful maxRetries="2" millisBetweenRetries="10000" failureExpression="exception!=null &amp;&amp; (exception.causedBy(java.io.IOException) || exception.causedBy(java.net.ConnectException)  || exception.causedBy(java.net.SocketTimeoutException))" synchronous="true" doc:name="Until Successful">
+            <http:request config-ref="SplunkHttp" path="/services/collector/event" method="POST" doc:name="Splunk_HTTP">
+                <http:request-builder>
+                    <http:header headerName="Authorization" value="Splunk ${splunk.token}"/>
+                    <http:header headerName="X-Splunk-Request-Channel" value="${splunk.channel.id}"/>
+                    <http:header headerName="Content-Type" value="application/json"/>
+                </http:request-builder>
+            </http:request>
+        </until-successful>
+        <logger message="#[message.payloadAs(java.lang.String)]" level="DEBUG" doc:name="Logger"/>
+        <choice doc:name="Choice">
+            <when expression="#[message.inboundProperties['http.status'] &lt;= 299]">
+                <object-to-string-transformer doc:name="Object to String"/>
+                <logger message="Uploaded logs are:  #[flowVars.finalpayload]" level="DEBUG" doc:name="Logger"/>
+                <logger message="Logs Uploaded to Splunk ------------  #[payload]" level="INFO" doc:name="Logger"/>
+            </when>
+            <otherwise>
+                <logger message="Sending logs to Splunk failed,    Failed Log Records are: #[flowVars.finalpayload],   Error Payload is: #[message.payloadAs(java.lang.String)]" level="INFO" doc:name="Logger"/>
+            </otherwise>
+        </choice>
+        <logger message="flow = end = batchFlow" level="INFO" doc:name="Logger"/>
+     </flow>    
+</mule>

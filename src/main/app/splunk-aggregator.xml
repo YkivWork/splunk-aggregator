@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:tracking="http://www.mulesoft.org/schema/mule/ee/tracking" xmlns:dw="http://www.mulesoft.org/schema/mule/ee/dw" xmlns:json="http://www.mulesoft.org/schema/mule/json" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:spring="http://www.springframework.org/schema/beans" xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:batch="http://www.mulesoft.org/schema/mule/batch"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd
+http://www.mulesoft.org/schema/mule/ee/dw http://www.mulesoft.org/schema/mule/ee/dw/current/dw.xsd
+http://www.mulesoft.org/schema/mule/ee/tracking http://www.mulesoft.org/schema/mule/ee/tracking/current/mule-tracking-ee.xsd">
+
+    <flow name="AggregatorJob" processingStrategy="synchronous" initialState="stopped">
+  <!--  QTC-726 Commented poller so that only Audit logs will be retrieved -->
+<!--         <poll doc:name="Poll">
+            <fixed-frequency-scheduler frequency="${polling.frequency}" />
+            <set-payload value="xxx" doc:name="Set Payload"/>
+        </poll> -->
+
+        <flow-ref name="platformapi.login" doc:name="platformapi.login"/>
+        <flow-ref name="platformapi.listEnvironments" doc:name="platformapi.listEnvironments"/>
+
+        <foreach collection="#[flowVars['environmentsList']]" doc:name="For Each">
+            <set-variable variableName="currentEnvId" value="#[message.payload['id']]" doc:name="Variable"/>
+            <set-variable variableName="currentEnvName" value="#[message.payload['name']]" doc:name="Variable"/>
+            <set-variable variableName="currentEnvIsProduction" value="#[message.payload['isProduction']]" doc:name="Variable"/>
+            
+            <logger level="DEBUG" message="Next ENV ID is #[flowVars['currentEnvId']]" doc:name="Logger"/>
+            <flow-ref name="platformapi.listApplications" doc:name="platformapi.listApplications"/>
+            <logger level="DEBUG" message="Apps list is #[flowVars['applicationsList']]" doc:name="Logger"/>
+
+            <foreach collection="#[flowVars['applicationsList']]" doc:name="For Each">
+                <logger level="DEBUG" message="Next app is #[message.payload['domain']]" doc:name="Logger"/>
+                <flow-ref name="platformapi.pullApplicationLogs" doc:name="platformapi.pullApplicationLogs"/>
+            </foreach>
+        </foreach>
+    </flow>
+
+    <batch:job name="PushLogsToSplunk" max-failed-records="-1">
+        <batch:threading-profile poolExhaustedAction="WAIT"/>
+
+        <batch:process-records>
+            <batch:step name="formatEntry">            
+                <set-payload value="#[message.payload['event']]" mimeType="application/java" doc:name="Set Payload"/>
+                <logger level="DEBUG" message="BEFORE Transform #[message.payload]" doc:name="Logger"/>
+                <dw:transform-message doc:name="Transform Message">
+                    <dw:set-payload><![CDATA[%dw 1.0
+%output application/json
+%var epoch = payload['timestamp']
+---
+{
+  event: payload['message'],
+  sourcetype: "mulesoft:cloudhub",
+  host: flowVars.appDomain,
+  time: epoch[0..9] ++ '.' ++ epoch[-3..-1],
+  fields:
+  {
+    logger: payload['loggerName'],
+    priority: payload['priority'],
+    threadName: payload['threadName'],
+    environment: flowVars.currentEnvName,
+    applicationName: flowVars.appDomain
+  }
+}]]></dw:set-payload>
+                </dw:transform-message>
+                
+                <logger level="DEBUG" message="AFTER Transform #[message.payload]" doc:name="Logger"/>
+            </batch:step>
+
+            <batch:step name="pushToSplunk">
+                 <http:request config-ref="SplunkHttp" method="POST" path="/services/collector/event" doc:name="HTTP">
+                    <http:request-builder>
+                        <http:header headerName="Authorization" value="Splunk ${splunk.token}"/>
+                        <http:header headerName="X-Splunk-Request-Channel" value="${splunk.channel.id}"/>
+                        <http:header headerName="Content-Type" value="application/json"/>
+                    </http:request-builder>
+                </http:request>
+                <object-to-string-transformer doc:name="Object to String"/>
+                <logger level="DEBUG" message="Message uploaded to Splunk: #[message.payload]" doc:name="Logger"/>
+            </batch:step>
+        </batch:process-records>
+
+    </batch:job>
+
+</mule>

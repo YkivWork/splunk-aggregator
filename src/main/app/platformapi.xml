@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:spring="http://www.springframework.org/schema/beans" xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:json="http://www.mulesoft.org/schema/mule/json"
+      xmlns:objectstore="http://www.mulesoft.org/schema/mule/objectstore"
+      xmlns:batch="http://www.mulesoft.org/schema/mule/batch"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/json http://www.mulesoft.org/schema/mule/json/current/mule-json.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/batch http://www.mulesoft.org/schema/mule/batch/current/mule-batch.xsd
+http://www.mulesoft.org/schema/mule/objectstore http://www.mulesoft.org/schema/mule/objectstore/current/mule-objectstore.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd">
+
+    <flow name="platformapi.login" processingStrategy="synchronous">
+        <enricher target="#[flowVars['bearerToken']]" doc:name="Message Enricher">
+            <processor-chain doc:name="Processor Chain">
+                <set-payload value="#['']" doc:name="Set Payload"/>
+                <ee:cache cachingStrategy-ref="ExpirableCachingStrategy" doc:name="Cache">
+
+                    <http:request path="/accounts/login" method="POST" config-ref="CloudHub" doc:name="HTTP">
+                        <http:request-builder>
+                            <http:query-param paramName="username" value="${cloudhub.user}"/>
+                            <http:query-param paramName="password" value="${cloudhub.password}"/>
+                        </http:request-builder>
+                    </http:request>
+
+                    <object-to-string-transformer doc:name="Object to String"/>
+                    <json:json-to-object-transformer returnClass="java.util.Map" doc:name="JSON to Object"/>
+                    <set-payload value="#[message.payload['access_token']]" doc:name="Set Payload"/>
+                    <logger level="INFO" message="Bearer Token is #[message.payload]" doc:name="Logger"/>
+                </ee:cache>
+            </processor-chain>
+        </enricher>
+    </flow>
+
+    <flow name="platformapi.listApplications" processingStrategy="synchronous">
+        <enricher target="#[flowVars['applicationsList']]" doc:name="Message Enricher">
+            <processor-chain doc:name="Processor Chain">
+                <set-payload value="#[flowVars['currentEnvId']]" doc:name="Set Payload"/>
+                <ee:cache cachingStrategy-ref="ExpirableCachingStrategy" doc:name="Cache">
+
+                    <http:request path="/cloudhub/api/v2/applications" method="GET" config-ref="CloudHub" doc:name="HTTP">
+                        <http:request-builder>
+                            <http:header headerName="Authorization" value="#['Bearer ' + flowVars['bearerToken']]"/>
+                            <http:header headerName="X-ANYPNT-ENV-ID" value="#[flowVars['currentEnvId']]"/>
+                        </http:request-builder>
+                        <http:success-status-code-validator values="200..599"/>
+                    </http:request>
+
+                    <choice doc:name="Choice">
+                        <when expression="#[message.inboundProperties['http.status'] &lt;= 299]">
+                            <object-to-string-transformer doc:name="Object to String"/>
+                            <json:json-to-object-transformer returnClass="java.util.List" doc:name="JSON to Object"/>
+                        </when>
+                        <otherwise>
+                            <logger level="INFO" message="HTTP Response from listApplications was #[message.inboundProperties['http.status']]" doc:name="Logger"/>
+                            <set-payload value="#[new java.util.ArrayList()]" doc:name="Set Payload"/>
+                        </otherwise>
+                    </choice>
+                </ee:cache>
+            </processor-chain>
+        </enricher>
+    </flow>
+
+    <flow name="platformapi.listEnvironments" processingStrategy="synchronous">
+        <enricher target="#[flowVars['environmentsList']]" doc:name="Message Enricher">
+            <processor-chain doc:name="Processor Chain">
+                <set-payload value="96b53a13-14d1-42d2-86de-b5cb38d410c0" doc:name="Set Payload"/>
+                <ee:cache cachingStrategy-ref="ExpirableCachingStrategy" doc:name="Cache">
+                    <set-variable variableName="environmentsList" value="#[new java.util.ArrayList()]" doc:name="Variable"/>
+                    <set-variable variableName="currentOrgId" value="${company.organization.id}" doc:name="Variable"/>
+                    <flow-ref name="platformapi._listEnvironmentsForOrg" doc:name="platformapi._listEnvironmentsForOrg"/>
+                    <set-payload value="#[flowVars['environmentsList']]" doc:name="Set Payload"/>
+                </ee:cache>
+            </processor-chain>
+        </enricher>
+    </flow>
+
+    <flow name="platformapi.pullApplicationLogs">
+        <set-variable variableName="appDomain" value="#[message.payload['domain']]" doc:name="Variable"/>
+
+        <choice doc:name="Choice">
+            <when expression="#[flowVars['appDomain'] != 'splunk-aggregator']">
+
+                <logger level="INFO" message="Getting logs for app #[message.payload['domain']]" doc:name="Logger"/>
+
+                <objectstore:retrieve key="#[flowVars['appDomain']]"
+                                      defaultValue-ref="#['']"
+                                      targetProperty="lowerId" targetScope="INVOCATION"
+                                      config-ref="RecordIdObjectStore"/>
+
+                <expression-component doc:name="Expression"><![CDATA[
+                    Map request = new HashMap();
+                    request.put("upperId", "");
+                    request.put("lowerId", flowVars['lowerId']);
+                    request.put("descending", new Boolean(false));
+                    request.put("limit", new Integer(10000));
+
+                    payload = request;
+                ]]></expression-component>
+
+                <json:object-to-json-transformer doc:name="Object to JSON"/>
+                <logger level="DEBUG" message="Logs Request #[message.payload]" doc:name="Logger"/>
+
+                <http:request path="/cloudhub/api/v2/applications/#[flowVars['appDomain']]/logs" method="POST"
+                              config-ref="CloudHub" doc:name="HTTP">
+                    <http:request-builder>
+                        <http:header headerName="Authorization" value="#['Bearer ' + flowVars['bearerToken']]"/>
+                        <http:header headerName="X-ANYPNT-ENV-ID" value="#[flowVars['currentEnvId']]"/>
+                        <http:header headerName="Content-Type" value="application/json"/>
+                    </http:request-builder>
+                    <http:success-status-code-validator values="200..599"/>
+                </http:request>
+
+                <choice doc:name="Choice">
+                    <when expression="#[message.inboundProperties['http.status'] &lt;= 299]">
+                        <object-to-string-transformer doc:name="Object to String"/>
+                        <logger level="DEBUG" message="New Logs: #[message.payload]" doc:name="Logger"/>
+                        <json:json-to-object-transformer returnClass="java.util.List" doc:name="JSON to Object"/>
+
+                        <enricher target="#[flowVars['upd']]" doc:name="Message Enricher">
+                            <choice doc:name="Choice">
+                                <when expression="#[message.payload.size() != 0]">
+                                    <enricher target="#[flowVars[store]]" doc:name="Message Enricher">
+                                        <processor-chain doc:name="Processor Chain">
+                                            <set-variable variableName="lastRecord"
+                                                          value="#[message.payload.get(message.payload.size() - 1)]" doc:name="Variable"/>
+                                            <objectstore:store key="#[flowVars['appDomain']]"
+                                                               value-ref="#[flowVars['lastRecord']['recordId']]"
+                                                               config-ref="RecordIdObjectStore" overwrite="true"/>
+                                        </processor-chain>
+                                    </enricher>
+                                    <!-- Call Batch Job -->
+                                    <batch:execute name="PushLogsToSplunk" doc:name="Batch Execute"/>
+                                </when>
+                                <otherwise>
+                                    <logger level="INFO" message="No new records" doc:name="Logger"/>
+                                </otherwise>
+                            </choice>
+                        </enricher>
+
+                    </when>
+                    <otherwise>
+                        <logger level="INFO" message="HTTP Response from CH Logs was #[message.inboundProperties['http.status']]" doc:name="Logger"/>
+                    </otherwise>
+                </choice>
+            </when>
+            <otherwise>
+                <logger level="DEBUG" message="Not aggregating my own logs" doc:name="Logger"/>
+            </otherwise>
+
+        </choice>
+    </flow>
+
+    <flow name="platformapi._listEnvironmentsForOrg" processingStrategy="synchronous">
+        <http:request path="#['/accounts/api/organizations/' + flowVars['currentOrgId']]" method="GET" config-ref="CloudHub" doc:name="HTTP">
+            <http:request-builder>
+                <http:header headerName="Authorization" value="#['Bearer ' + flowVars['bearerToken']]"/>
+            </http:request-builder>
+            <http:success-status-code-validator values="200..599"/>
+        </http:request>
+
+        <choice doc:name="Choice">
+            <when expression="#[message.inboundProperties['http.status'] &lt;= 299]">
+                <object-to-string-transformer doc:name="Object to String"/>
+                <json:json-to-object-transformer returnClass="java.util.Map" doc:name="JSON to Object"/>
+
+                <foreach collection="#[message.payload['environments']]" doc:name="For Each">
+                    <expression-component doc:name="Expression">
+                        flowVars['environmentsList'].add(['id': message.payload['id'], 'name': message.payload['name'], 'isProduction': message.payload['isProduction']]);
+                    </expression-component>
+                </foreach>
+
+                <foreach collection="#[message.payload['subOrganizationIds']]" doc:name="For Each">
+                    <processor-chain doc:name="Processor Chain">
+                        <set-variable variableName="currentOrgId" value="#[message.payload]" doc:name="Variable"/>
+                        <flow-ref name="platformapi._listEnvironmentsForOrg" doc:name="platformapi._listEnvironmentsForOrg"/>
+                    </processor-chain>
+                </foreach>
+            </when>
+            <otherwise>
+                <logger level="INFO"
+                        message="HTTP Response from _listEnvironmentsForOrg was #[message.inboundProperties['http.status']]" doc:name="Logger"/>
+            </otherwise>
+        </choice>
+    </flow>
+
+</mule>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:vm="http://www.mulesoft.org/schema/mule/vm" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:spring="http://www.springframework.org/schema/beans" xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:context="http://www.springframework.org/schema/context"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:objectstore="http://www.mulesoft.org/schema/mule/objectstore"
+      xmlns:tls="http://www.mulesoft.org/schema/mule/tls"
+      xsi:schemaLocation="http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context-current.xsd
+http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/objectstore http://www.mulesoft.org/schema/mule/objectstore/current/mule-objectstore.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/tls http://www.mulesoft.org/schema/mule/tls/current/mule-tls.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-current.xsd
+http://www.mulesoft.org/schema/mule/vm http://www.mulesoft.org/schema/mule/vm/current/mule-vm.xsd">
+
+    <context:property-placeholder location="classpath:${mule.env}.properties"/>
+
+    <http:request-config name="CloudHub"
+                         basePath="/" host="${cloudhub.host}"
+                         port="${cloudhub.port}" protocol="HTTPS" doc:name="HTTP Request Configuration"/>
+
+    <objectstore:config name="RecordIdObjectStore" partition="splunk-aggregator-store" persistent="true" doc:name="ObjectStore"/>
+
+    <ee:object-store-caching-strategy entryTTL="5000000" name="ExpirableCachingStrategy" doc:name="Caching Strategy"/>
+
+    <http:request-config name="SplunkHttp" host="${splunk.ip}" port="${splunk.port}" basePath="/" protocol="HTTPS" doc:name="HTTP Request Configuration">
+        <tls:context name="TLS_Context">
+            <tls:trust-store insecure="true"/>
+        </tls:context>
+    </http:request-config>
+    <objectstore:config name="AuditObjectStore" partition="splunk-audit-store" persistent="true" doc:name="ObjectStore"/>
+    <vm:connector name="AuditVM" validateConnections="true" doc:name="VM"/>
+
+</mule>
